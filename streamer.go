@@ -261,17 +261,11 @@ func (b *Streamer) insertAllToBigQuery() {
 					if b.shouldInsertNewTable(err) {
 						row := d[tID][0]
 						// TODO: remove bq dependency?
-						schema, err := bq.SchemaFromJSON(row.jsonValue)
-						if err != nil {
-							b.Errors <- err
-						} else {
-							table, err := b.insertNewTable(pID, dID, tID, schema)
-							if err != nil {
-								b.Errors <- err
-							} else {
-								fmt.Println("BQ: Created table", table.TableReference.TableId)
-								continue
-							}
+						schema, _ := bq.SchemaFromJSON(row.jsonValue)
+						var table *bigquery.Table
+						table, err = b.insertNewTable(pID, dID, tID, schema)
+						if err == nil {
+							fmt.Println("BQ: Created table", table.TableReference.TableId)
 						}
 					}
 
