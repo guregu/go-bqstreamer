@@ -3,9 +3,11 @@ package bqstreamer
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dchest/uniuri"
+	"github.com/guregu/bq"
 	bigquery "google.golang.org/api/bigquery/v2"
 	"google.golang.org/api/googleapi"
 	"gopkg.in/validator.v2"
@@ -40,6 +42,9 @@ type Streamer struct {
 	// Maximum retry insert attempts for non-rejected row insert errors.
 	// e.g. GoogleAPI HTTP errors, generic HTTP errors, etc.
 	MaxRetryInsert int `validate:"min=0"`
+
+	// Automatically create tables if they don't exist.
+	CreateTables bool
 
 	// Shutdown channel to stop Start() execution.
 	stopChannel chan bool
@@ -237,6 +242,7 @@ func (b *Streamer) insertAllToBigQuery() {
 				// Insert to a single table in bulk, and retry insert on certain errors.
 				// Keep on retrying until successful.
 				numRetries := 0
+
 				for {
 					numRetries++
 					if numRetries > b.MaxRetryInsert {
@@ -250,6 +256,24 @@ func (b *Streamer) insertAllToBigQuery() {
 					}
 
 					responses, err := b.insertTable(pID, dID, tID, d[tID])
+
+					// Automatically insert tables
+					if b.shouldInsertNewTable(err) {
+						row := d[tID][0]
+						// TODO: remove bq dependency?
+						schema, err := bq.SchemaFromJSON(row.jsonValue)
+						if err != nil {
+							b.Errors <- err
+						} else {
+							table, err := b.insertNewTable(pID, dID, tID, schema)
+							if err != nil {
+								b.Errors <- err
+							} else {
+								fmt.Println("BQ: Created table", table.TableReference.TableId)
+								continue
+							}
+						}
+					}
 
 					// Retry on certain HTTP errors.
 					if b.shouldRetryInsertAfterError(err) {
@@ -304,6 +328,20 @@ func (b *Streamer) insertTableToBigQuery(projectID, datasetID, tableID string, t
 	return
 }
 
+// insertNewTable creates a new BigQuery table
+func (b *Streamer) insertNewTable(projectID, datasetID, tableID string, schema *bigquery.TableSchema) (*bigquery.Table, error) {
+	tables := bigquery.NewTablesService(b.service)
+	table := &bigquery.Table{
+		Schema: schema,
+		TableReference: &bigquery.TableReference{
+			ProjectId: projectID,
+			DatasetId: datasetID,
+			TableId:   tableID,
+		},
+	}
+	return tables.Insert(projectID, datasetID, table).Do()
+}
+
 // shouldRetryInsertAfterError checks for insert HTTP response errors,
 // and returns true if insert should be retried.
 // See the following url for more info:
@@ -326,6 +364,21 @@ func (b *Streamer) shouldRetryInsertAfterError(err error) (shouldRetry bool) {
 	}
 
 	return
+}
+
+func (b *Streamer) shouldInsertNewTable(err error) (shouldCreate bool) {
+	if !b.CreateTables {
+		return false
+	}
+
+	// Return true only when a table not found error happens
+	if gerr, ok := err.(*googleapi.Error); ok {
+		if gerr.Code == 404 && strings.Contains(gerr.Message, "Not found: Table") {
+			return true
+		}
+	}
+
+	return false
 }
 
 // filterRejectedRows checks for per-row responses,
