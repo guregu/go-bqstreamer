@@ -336,7 +336,7 @@ func (b *Streamer) insertNewTable(projectID, datasetID, tableID string, schema *
 	return tables.Insert(projectID, datasetID, table).Do()
 }
 
-// insertNewTable creates a new BigQuery table
+// updateTableSchema updates a pre-existing table's schema
 func (b *Streamer) updateTableSchema(projectID, datasetID, tableID string, schema *bigquery.TableSchema) (*bigquery.Table, error) {
 	tables := bigquery.NewTablesService(b.service)
 	table := &bigquery.Table{
@@ -394,6 +394,7 @@ func (b *Streamer) shouldUpdateTableSchema(err bigquery.ErrorProto) (shouldCreat
 		return false
 	}
 
+	// TODO: support errors besides missing fields?
 	return err.Reason == "invalid" && strings.Contains(err.Message, "no such field")
 }
 
