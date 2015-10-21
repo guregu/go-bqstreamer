@@ -336,6 +336,20 @@ func (b *Streamer) insertNewTable(projectID, datasetID, tableID string, schema *
 	return tables.Insert(projectID, datasetID, table).Do()
 }
 
+// insertNewTable creates a new BigQuery table
+func (b *Streamer) updateTableSchema(projectID, datasetID, tableID string, schema *bigquery.TableSchema) (*bigquery.Table, error) {
+	tables := bigquery.NewTablesService(b.service)
+	table := &bigquery.Table{
+		Schema: schema,
+		TableReference: &bigquery.TableReference{
+			ProjectId: projectID,
+			DatasetId: datasetID,
+			TableId:   tableID,
+		},
+	}
+	return tables.Update(projectID, datasetID, tableID, table).Do()
+}
+
 // shouldRetryInsertAfterError checks for insert HTTP response errors,
 // and returns true if insert should be retried.
 // See the following url for more info:
@@ -375,6 +389,14 @@ func (b *Streamer) shouldInsertNewTable(err error) (shouldCreate bool) {
 	return false
 }
 
+func (b *Streamer) shouldUpdateTableSchema(err bigquery.ErrorProto) (shouldCreate bool) {
+	if !b.CreateTables {
+		return false
+	}
+
+	return err.Reason == "invalid" && strings.Contains(err.Message, "no such field")
+}
+
 // filterRejectedRows checks for per-row responses,
 // removes rejected rows given table, and returns index slice of rows removed.
 //
@@ -409,6 +431,22 @@ func (b *Streamer) filterRejectedRows(
 					if !filter {
 						rowsToFilter = append(rowsToFilter, rowErrors.Index)
 						filter = true
+					}
+
+					// update schema if necessary
+					if b.shouldUpdateTableSchema(rowError) {
+						fmt.Println("bqstreamer: updating schema...")
+						schema, err := bq.SchemaFromJSON(d[tID][rowErrors.Index].jsonValue)
+						if err == nil {
+							_, err := b.updateTableSchema(pID, dID, tID, schema)
+							if err == nil {
+								// re-queue this request
+								b.QueueRow(pID, dID, tID, d[tID][rowErrors.Index].jsonValue)
+								continue
+							} else {
+								b.Errors <- err
+							}
+						}
 					}
 
 					// Log all errors besides "stopped" ones.
