@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dchest/uniuri"
@@ -322,6 +323,13 @@ func (b *Streamer) insertTableToBigQuery(projectID, datasetID, tableID string, t
 	return
 }
 
+var tableInsertions = struct {
+	inserted map[string]struct{}
+	sync.Mutex
+}{inserted: make(map[string]struct{})}
+
+var alreadyInsertingErr = fmt.Errorf("already inserting table...")
+
 // insertNewTable creates a new BigQuery table
 func (b *Streamer) insertNewTable(projectID, datasetID, tableID string, schema *bigquery.TableSchema) (*bigquery.Table, error) {
 	tables := bigquery.NewTablesService(b.service)
@@ -333,7 +341,25 @@ func (b *Streamer) insertNewTable(projectID, datasetID, tableID string, schema *
 			TableId:   tableID,
 		},
 	}
-	return tables.Insert(projectID, datasetID, table).Do()
+
+	tableInsertions.Lock()
+	defer tableInsertions.Unlock()
+	key := projectID + datasetID + tableID
+
+	if _, exists := tableInsertions.inserted[key]; exists {
+		return nil, alreadyInsertingErr
+	}
+
+	t, err := tables.Insert(projectID, datasetID, table).Do()
+	if gerr, ok := err.(*googleapi.Error); ok {
+		if gerr.Code == 409 && strings.Contains(gerr.Message, "Already Exists") {
+			err = nil
+		}
+	}
+	if err == nil {
+		tableInsertions.inserted[key] = struct{}{}
+	}
+	return t, err
 }
 
 // updateTableSchema updates a pre-existing table's schema
@@ -358,6 +384,11 @@ func (b *Streamer) shouldRetryInsertAfterError(err error) (shouldRetry bool) {
 	shouldRetry = false
 
 	if err != nil {
+		if err == alreadyInsertingErr {
+			fmt.Println("Already inserting... retry....")
+			return true
+		}
+
 		// Retry on GoogleAPI HTTP server error (500, 503).
 		if gerr, ok := err.(*googleapi.Error); ok {
 			switch gerr.Code {
